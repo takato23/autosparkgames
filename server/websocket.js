@@ -11,15 +11,18 @@ const port = 3004
 const app = next({ dev, hostname, port })
 const handle = app.getRequestHandler()
 
-// Usa el io inyectado por server/socket.dev.js si existe; si no, crea uno standalone
-let io = global.__io
-if (!io) {
-  const http = require('http')
-  const server = http.createServer((req, res) => res.end('socket-standalone'))
-  const PORT = process.env.SOCKET_PORT || 3010
-  const PATH = process.env.SOCKET_PATH || '/socket.io'
-  io = new Server(server, { path: PATH, cors: { origin: true, credentials: false } })
-  server.listen(PORT, () => console.log(`[socket-standalone] on :${PORT}${PATH}`))
+// Solo iniciar servidores si este archivo es el entrypoint directo
+if (require.main === module) {
+  // Usa el io inyectado por server/socket.dev.js si existe; si no, crea uno standalone
+  let io = global.__io
+  if (!io) {
+    const http = require('http')
+    const server = http.createServer((req, res) => res.end('socket-standalone'))
+    const PORT = process.env.SOCKET_PORT || 3010
+    const PATH = process.env.SOCKET_PATH || '/socket.io'
+    io = new Server(server, { path: PATH, cors: { origin: true, credentials: false } })
+    server.listen(PORT, () => console.log(`[socket-standalone] on :${PORT}${PATH}`))
+  }
 }
 
 // Game state stored in memory
@@ -199,30 +202,11 @@ function generateCollaboratorColor(index) {
   return colors[index % colors.length]
 }
 
-app.prepare().then(() => {
-  const server = createServer((req, res) => {
-    // Add error handling for Next.js routes
-    handle(req, res).catch((err) => {
-      console.error('Error handling request:', err)
-      res.statusCode = 500
-      res.end('Internal Server Error')
-    })
-  })
-
-  const io = new Server(server, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"]
-    },
-    pingTimeout: 60000,
-    pingInterval: 30000,
-  })
-
-  initializeDemoPresentations()
-
+function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
   // Socket.io connection handling
   io.on('connection', (socket) => {
     console.log('User connected:', socket.id)
+
     // Register/update a presentation definition in server memory
     socket.on('register-presentation', ({ presentation }) => {
       try {
@@ -230,20 +214,15 @@ app.prepare().then(() => {
           socket.emit('error', { message: 'Presentación inválida' })
           return
         }
-
         // Guardar/actualizar en memoria
         gameState.presentations.set(presentation.id, presentation)
-
-        socket.emit('presentation-registered', {
-          id: presentation.id,
-        })
+        socket.emit('presentation-registered', { id: presentation.id })
       } catch (err) {
         console.error('Error registrando presentación:', err)
         socket.emit('error', { message: 'No se pudo registrar la presentación' })
       }
     })
 
-    
     // Track connected user
     gameState.users.set(socket.id, {
       id: socket.id,
@@ -263,13 +242,11 @@ app.prepare().then(() => {
         socket.emit('error', { message: 'Demasiadas acciones. Intenta de nuevo en un momento.' })
         return
       }
-
       // Validate presentation exists
       if (!gameState.presentations.has(presentationId)) {
         socket.emit('error', { message: 'Presentación no encontrada' })
         return
       }
-
       const sessionCode = generateSessionCode()
       const session = {
         id: sessionCode,
@@ -301,21 +278,18 @@ app.prepare().then(() => {
         startedAt: null,
         endedAt: null,
       }
-      
       gameState.sessions.set(sessionCode, session)
       socket.join(`session-${sessionCode}`)
       socket.join(`host-${sessionCode}`)
-      
       // Update user's session
       const user = gameState.users.get(socket.id)
       if (user) {
         user.sessionCode = sessionCode
         user.role = 'host'
       }
-      
       const presentation = gameState.presentations.get(presentationId)
       // eslint-disable-next-line no-console
-      console.log('[WS] create-session', { presentationId, code: sessionCode })
+      console.log(`${prefixLog} create-session`, { presentationId, code: sessionCode })
       socket.emit('session-created', { 
         session: {
           ...session,
@@ -324,7 +298,6 @@ app.prepare().then(() => {
         presentation,
         serverUrl: `http://${ip.address()}:${port}`
       })
-      
       // eslint-disable-next-line no-console
       console.log(`Session created: ${sessionCode} by ${socket.id}`)
     })
@@ -332,29 +305,26 @@ app.prepare().then(() => {
     // Join session as participant
     socket.on('join-session', async ({ code, name, team }) => {
       // eslint-disable-next-line no-console
-      console.log('[WS] join-session ←', { code, name })
+      console.log(`${prefixLog} join-session ←`, { code, name })
       // Rate limiting
       if (!checkRateLimit(socket.id, 'actions')) {
         socket.emit('error', { message: 'Demasiadas acciones. Intenta de nuevo en un momento.' })
         return
       }
-
       // Validate code format
       if (!validateSessionCode(code)) {
         // eslint-disable-next-line no-console
-        console.warn('[WS] join-session rechazado: código inválido', { code })
+        console.warn(`${prefixLog} join-session rechazado: código inválido`, { code })
         socket.emit('error', { message: 'Código de sesión inválido' })
         return
       }
-
       const session = gameState.sessions.get(code)
       if (!session) {
         // eslint-disable-next-line no-console
-        console.warn('[WS] join-session rechazado: sesión no encontrada', { code })
+        console.warn(`${prefixLog} join-session rechazado: sesión no encontrada`, { code })
         socket.emit('error', { message: 'Sesión no encontrada' })
         return
       }
-
       // Validación contra Firestore: sessionsMeta/{code}
       try {
         const { adminDb } = require('../lib/firebase/admin')
@@ -365,7 +335,7 @@ app.prepare().then(() => {
           const now = Date.now()
           if (meta.expiresAt && new Date(meta.expiresAt).getTime() < now) {
             // eslint-disable-next-line no-console
-            console.warn('[WS] join-session rechazado: código expirado', { code })
+            console.warn(`${prefixLog} join-session rechazado: código expirado`, { code })
             socket.emit('error', { message: 'Código expirado' })
             return
           }
@@ -373,43 +343,39 @@ app.prepare().then(() => {
             const activeCount = Array.from(session.participants.values()).filter(p => p.isActive !== false).length
             if (activeCount >= meta.maxParticipants) {
               // eslint-disable-next-line no-console
-              console.warn('[WS] join-session rechazado: capacidad llena', { code, activeCount, max: meta.maxParticipants })
+              console.warn(`${prefixLog} join-session rechazado: capacidad llena`, { code, activeCount, max: meta.maxParticipants })
               socket.emit('error', { message: 'Capacidad llena' })
               return
             }
           }
         } else {
           // eslint-disable-next-line no-console
-          console.warn('[WS] join-session: sessionsMeta no existe, permitiendo DEV', { code })
+          console.warn(`${prefixLog} join-session: sessionsMeta no existe, permitiendo DEV`, { code })
         }
       } catch (e) {
         // eslint-disable-next-line no-console
-        console.error('[WS] join-session validación meta falló', e)
+        console.error(`${prefixLog} join-session validación meta falló`, e)
       }
-
       // Check if session is joinable
       if (session.status === 'ended') {
         // eslint-disable-next-line no-console
-        console.warn('[WS] join-session rechazado: sesión terminada', { code })
+        console.warn(`${prefixLog} join-session rechazado: sesión terminada`, { code })
         socket.emit('error', { message: 'La sesión ha terminado' })
         return
       }
-
       if (!session.settings.allowLateJoin && session.status !== 'waiting') {
         // eslint-disable-next-line no-console
-        console.warn('[WS] join-session rechazado: sesión ya comenzó', { code })
+        console.warn(`${prefixLog} join-session rechazado: sesión ya comenzó`, { code })
         socket.emit('error', { message: 'La sesión ya comenzó' })
         return
       }
-
       // Validate name
       if (!name || name.trim().length === 0) {
         // eslint-disable-next-line no-console
-        console.warn('[WS] join-session rechazado: nombre requerido', { code })
+        console.warn(`${prefixLog} join-session rechazado: nombre requerido`, { code })
         socket.emit('error', { message: 'Nombre requerido' })
         return
       }
-
       const participant = {
         id: socket.id,
         name: name.trim(),
@@ -419,20 +385,16 @@ app.prepare().then(() => {
         joinedAt: new Date(),
         lastActiveAt: new Date(),
       }
-
       session.participants.set(socket.id, participant)
       socket.join(`session-${code}`)
-      
       // Update user's session
       const user = gameState.users.get(socket.id)
       if (user) {
         user.sessionCode = code
         user.role = 'participant'
       }
-      
       const presentation = gameState.presentations.get(session.presentationId)
       const currentSlide = presentation.slides[session.currentSlideIndex]
-
       socket.emit('joined-session', {
         session: {
           code: session.code,
@@ -444,20 +406,17 @@ app.prepare().then(() => {
         currentSlide,
         participant
       })
-
       // Notify host of new participant
       io.to(`host-${code}`).emit('participant-joined', {
         participant,
         totalParticipants: session.participants.size
       })
-
       // Broadcast conteo de audiencia a todos en la sesión
       io.to(`session-${code}`).emit('audience:update', {
         totalParticipants: session.participants.size,
       })
-      
       // eslint-disable-next-line no-console
-      console.log('[WS] join-session OK → participante unido', { code, name, room: `session-${code}` })
+      console.log(`${prefixLog} join-session OK → participante unido`, { code, name, room: `session-${code}` })
     })
 
     // Start session
@@ -467,14 +426,11 @@ app.prepare().then(() => {
         socket.emit('error', { message: 'No autorizado' })
         return
       }
-
       session.status = 'active'
       session.startedAt = new Date()
-
       io.to(`session-${sessionCode}`).emit('session-started', {
         startedAt: session.startedAt
       })
-
       console.log(`Session ${sessionCode} started`)
     })
 
@@ -485,44 +441,32 @@ app.prepare().then(() => {
         socket.emit('error', { message: 'No autorizado' })
         return
       }
-
       session.status = 'ended'
       session.endedAt = new Date()
-
       // Cleanup en memoria: timers, tallies y respuestas marcadas
       try {
         if (session.resultsEmitTimers && session.resultsEmitTimers.size > 0) {
-          session.resultsEmitTimers.forEach((t) => {
-            try { clearTimeout(t) } catch {}
-          })
+          session.resultsEmitTimers.forEach((t) => { try { clearTimeout(t) } catch {} })
           session.resultsEmitTimers.clear()
         }
-        if (session.answeredBySlide) {
-          session.answeredBySlide.clear()
-        }
-        if (session.tallies) {
-          session.tallies.clear()
-        }
+        if (session.answeredBySlide) session.answeredBySlide.clear()
+        if (session.tallies) session.tallies.clear()
         console.log(`[end-session] cleanup: timers=${session.resultsEmitTimers?.size || 0}, tallies=${session.tallies?.size || 0}`)
       } catch (e) {
         console.error('[end-session] cleanup error', e)
       }
-
       // Calculate final results
       const finalResults = {
         leaderboard: session.leaderboard,
         duration: session.endedAt - session.startedAt,
         totalParticipants: session.participants.size,
       }
-
       io.to(`session-${sessionCode}`).emit('session-ended', finalResults)
-
       // Clean up after 5 minutes
       setTimeout(() => {
         gameState.sessions.delete(sessionCode)
         console.log(`Session ${sessionCode} cleaned up`)
       }, 300000)
-
       console.log(`Session ${sessionCode} ended`)
     })
 
@@ -532,26 +476,19 @@ app.prepare().then(() => {
         socket.emit('error', { message: 'Demasiadas acciones' })
         return
       }
-
       const session = gameState.sessions.get(sessionCode)
       if (!session || socket.id !== session.host) return
-
       const presentation = gameState.presentations.get(session.presentationId)
       if (session.currentSlideIndex < presentation.slides.length - 1) {
         session.currentSlideIndex++
         const currentSlide = presentation.slides[session.currentSlideIndex]
-        
         io.to(`session-${sessionCode}`).emit('slide-changed', {
           slideIndex: session.currentSlideIndex,
           slide: currentSlide
         })
-
-        // Start timer for timed slides
         if (currentSlide.timeLimit) {
           setTimeout(() => {
-            io.to(`session-${sessionCode}`).emit('time-up', {
-              slideId: currentSlide.id
-            })
+            io.to(`session-${sessionCode}`).emit('time-up', { slideId: currentSlide.id })
           }, currentSlide.timeLimit * 1000)
         }
       }
@@ -566,30 +503,19 @@ app.prepare().then(() => {
         if (!code) return
         const session = gameState.sessions.get(code)
         if (!session || socket.id !== session.host) return
-
         const presentation = gameState.presentations.get(session.presentationId)
         if (!presentation) return
         if (typeof slideIndex !== 'number' || slideIndex < 0 || slideIndex >= presentation.slides.length) return
-
         session.currentSlideIndex = slideIndex
         session.slideState = 'show'
         session.state = 'show'
-
         const currentSlide = presentation.slides[session.currentSlideIndex]
-
         // Compat heredada
-        io.to(`session-${code}`).emit('slide-changed', {
-          slideIndex: session.currentSlideIndex,
-          slide: currentSlide,
-        })
-
+        io.to(`session-${code}`).emit('slide-changed', { slideIndex: session.currentSlideIndex, slide: currentSlide })
         // Nuevo evento
         // eslint-disable-next-line no-console
-        console.log('[WS] question:show', { code, slideIndex: session.currentSlideIndex })
-        io.to(`session-${code}`).emit('slide:state', {
-          slideIndex: session.currentSlideIndex,
-          state: 'show',
-        })
+        console.log(`${prefixLog} question:show`, { code, slideIndex: session.currentSlideIndex })
+        io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'show' })
       } catch (error) {
         // eslint-disable-next-line no-console
         console.error('[WebSocket] question:show error', error)
@@ -603,20 +529,15 @@ app.prepare().then(() => {
         if (!code) return
         const session = gameState.sessions.get(code)
         if (!session || socket.id !== session.host) return
-
         // Si se provee slideIndex, sincronizamos
         if (typeof slideIndex === 'number') {
           session.currentSlideIndex = slideIndex
         }
         session.slideState = 'locked'
         session.state = 'locked'
-
         // eslint-disable-next-line no-console
-        console.log('[WS] question:lock', { code, slideIndex: session.currentSlideIndex })
-        io.to(`session-${code}`).emit('slide:state', {
-          slideIndex: session.currentSlideIndex,
-          state: 'locked',
-        })
+        console.log(`${prefixLog} question:lock`, { code, slideIndex: session.currentSlideIndex })
+        io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'locked' })
       } catch (error) {
         // eslint-disable-next-line no-console
         console.error('[WebSocket] question:lock error', error)
@@ -630,19 +551,14 @@ app.prepare().then(() => {
         if (!code) return
         const session = gameState.sessions.get(code)
         if (!session || socket.id !== session.host) return
-
         if (typeof slideIndex === 'number') {
           session.currentSlideIndex = slideIndex
         }
         session.slideState = 'reveal'
         session.state = 'reveal'
-
         // eslint-disable-next-line no-console
-        console.log('[WS] question:reveal', { code, slideIndex: session.currentSlideIndex })
-        io.to(`session-${code}`).emit('slide:state', {
-          slideIndex: session.currentSlideIndex,
-          state: 'reveal',
-        })
+        console.log(`${prefixLog} question:reveal`, { code, slideIndex: session.currentSlideIndex })
+        io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'reveal' })
       } catch (error) {
         // eslint-disable-next-line no-console
         console.error('[WebSocket] question:reveal error', error)
@@ -656,80 +572,42 @@ app.prepare().then(() => {
         if (!code) return
         const session = gameState.sessions.get(code)
         if (!session || socket.id !== session.host) return
-
         const presentation = gameState.presentations.get(session.presentationId)
         if (!presentation) return
         if (typeof nextIndex !== 'number' || nextIndex < 0 || nextIndex >= presentation.slides.length) return
-
         session.currentSlideIndex = nextIndex
         session.slideState = 'show'
         session.state = 'show'
-
         const currentSlide = presentation.slides[session.currentSlideIndex]
-
         // Compat heredada
-        io.to(`session-${code}`).emit('slide-changed', {
-          slideIndex: session.currentSlideIndex,
-          slide: currentSlide,
-        })
-
+        io.to(`session-${code}`).emit('slide-changed', { slideIndex: session.currentSlideIndex, slide: currentSlide })
         // Nuevo evento
         // eslint-disable-next-line no-console
-        console.log('[WS] question:next', { code, nextIndex: session.currentSlideIndex })
-        io.to(`session-${code}`).emit('slide:state', {
-          slideIndex: session.currentSlideIndex,
-          state: 'show',
-        })
+        console.log(`${prefixLog} question:next`, { code, nextIndex: session.currentSlideIndex })
+        io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'show' })
       } catch (error) {
         // eslint-disable-next-line no-console
         console.error('[WebSocket] question:next error', error)
       }
     })
 
-    socket.on('previous-slide', ({ sessionCode }) => {
-      if (!checkRateLimit(socket.id, 'actions')) {
-        socket.emit('error', { message: 'Demasiadas acciones' })
-        return
-      }
-
-      const session = gameState.sessions.get(sessionCode)
-      if (!session || socket.id !== session.host) return
-
-      const presentation = gameState.presentations.get(session.presentationId)
-      if (session.currentSlideIndex > 0) {
-        session.currentSlideIndex--
-        const currentSlide = presentation.slides[session.currentSlideIndex]
-        
-        io.to(`session-${sessionCode}`).emit('slide-changed', {
-          slideIndex: session.currentSlideIndex,
-          slide: currentSlide
-        })
-      }
-    })
-
-    // Submit answer
+    // Submit answer (legacy)
     socket.on('submit-answer', ({ sessionCode, slideId, answer, timeSpent }) => {
       if (!checkRateLimit(socket.id, 'messages')) {
         socket.emit('error', { message: 'Demasiadas respuestas' })
         return
       }
-
       const session = gameState.sessions.get(sessionCode)
       if (!session) return
-
       const participant = session.participants.get(socket.id)
       if (!participant) return
-
       // Update last active
       participant.lastActiveAt = new Date()
-
       const presentation = gameState.presentations.get(session.presentationId)
       const slide = presentation.slides.find(s => s.id === slideId)
-      
       // Calculate points for trivia
       let pointsEarned = 0
       let isCorrect = false
-      
       if (slide.type === 'trivia') {
         isCorrect = answer === slide.correctAnswer
         if (isCorrect) {
@@ -739,11 +617,8 @@ app.prepare().then(() => {
           participant.score += pointsEarned
         }
       }
-
       // Store response
-      if (!session.responses.has(slideId)) {
-        session.responses.set(slideId, [])
-      }
+      if (!session.responses.has(slideId)) session.responses.set(slideId, [])
       session.responses.get(slideId).push({
         participantId: socket.id,
         answer,
@@ -752,12 +627,9 @@ app.prepare().then(() => {
         timeSpent,
         timestamp: new Date()
       })
-
       participant.responses.set(slideId, { answer, isCorrect, pointsEarned })
-
       // Update leaderboard
       updateLeaderboard(session)
-
       // Send results to host
       io.to(`host-${sessionCode}`).emit('answer-received', {
         slideId,
@@ -768,7 +640,6 @@ app.prepare().then(() => {
         responses: session.responses.get(slideId),
         leaderboard: session.leaderboard
       })
-
       // Confirm to participant
       socket.emit('answer-confirmed', { isCorrect, pointsEarned })
     })
@@ -780,22 +651,18 @@ app.prepare().then(() => {
           socket.emit('error', { message: 'Demasiadas respuestas' })
           return
         }
-
         const user = gameState.users.get(socket.id)
         const code = user?.sessionCode
         if (!code) return
         const session = gameState.sessions.get(code)
         if (!session) return
-
         // Si la pregunta está bloqueada, rechazar
         if (session.slideState === 'locked') {
           socket.emit('error', { message: 'Respuestas bloqueadas' })
           return
         }
-
         const presentation = gameState.presentations.get(session.presentationId)
         if (!presentation) return
-
         const effectiveIndex = typeof slideIndex === 'number' ? slideIndex : session.currentSlideIndex
         const slide = presentation.slides[effectiveIndex]
         if (!slide || slide.id !== slideId) {
@@ -803,48 +670,38 @@ app.prepare().then(() => {
           const byId = presentation.slides.find(s => s.id === slideId)
           if (!byId) return
         }
-
         const resolvedSlide = presentation.slides[effectiveIndex] && presentation.slides[effectiveIndex].id === slideId
           ? presentation.slides[effectiveIndex]
           : presentation.slides.find(s => s.id === slideId)
-
         if (!resolvedSlide || !Array.isArray(resolvedSlide.options)) return
-
         // Solo aceptar multiple choice/trivia
         const slideType = resolvedSlide.type
         const isMultipleChoice = slideType === 'multiple_choice' || slideType === 'trivia'
         if (!isMultipleChoice) return
-
         // Validar rango
         if (typeof answer !== 'number' || answer < 0 || answer >= resolvedSlide.options.length) {
           socket.emit('error', { message: 'Respuesta inválida' })
           return
         }
-
         // Evitar respuestas duplicadas por participante
         if (!session.answeredBySlide.has(slideId)) {
           session.answeredBySlide.set(slideId, new Set())
         }
         const answeredSet = session.answeredBySlide.get(slideId)
-        if (answeredSet.has(socket.id)) {
-          return // ignorar segundo intento
-        }
+        if (answeredSet.has(socket.id)) return // ignorar segundo intento
         answeredSet.add(socket.id)
-
         // Inicializar tallies
         if (!session.tallies.has(slideId)) {
           session.tallies.set(slideId, new Array(resolvedSlide.options.length).fill(0))
         }
         const counts = session.tallies.get(slideId)
         counts[answer] = (counts[answer] || 0) + 1
-
         // Emitir actualización inmediata
         const total = counts.reduce((a, b) => a + b, 0)
         // eslint-disable-next-line no-console
-        console.log('[WS] answer:submit', { code, slideId, slideIndex: effectiveIndex })
+        console.log(`${prefixLog} answer:submit`, { code, slideId, slideIndex: effectiveIndex })
         io.to(`host-${code}`).emit('results:update', { slideId, counts: [...counts], total })
         io.to(`session-${code}`).emit('results:update', { slideId, counts: [...counts], total })
-
         // Debounce 150ms si estamos en reveal
         if (session.slideState === 'reveal') {
           const existingTimer = session.resultsEmitTimers.get(slideId)
@@ -880,20 +737,16 @@ app.prepare().then(() => {
         socket.emit('error', { message: 'Demasiadas respuestas' })
         return
       }
-
       const session = gameState.sessions.get(sessionCode)
       if (!session) return
-
       if (!session.responses.has(slideId)) {
         session.responses.set(slideId, [])
       }
-
       session.responses.get(slideId).push({
         participantId: socket.id,
         words,
         timestamp: new Date()
       })
-
       // Aggregate word cloud data
       const wordCounts = new Map()
       session.responses.get(slideId).forEach(response => {
@@ -902,7 +755,6 @@ app.prepare().then(() => {
           wordCounts.set(normalized, (wordCounts.get(normalized) || 0) + 1)
         })
       })
-
       // Send to all participants
       io.to(`session-${sessionCode}`).emit('word-cloud-update', {
         slideId,
@@ -915,20 +767,16 @@ app.prepare().then(() => {
       if (!checkRateLimit(socket.id, 'messages')) {
         return // Silent fail for reactions
       }
-
       const session = gameState.sessions.get(sessionCode)
       if (!session) return
-
       const participant = session.participants.get(socket.id)
       if (!participant) return
-
       io.to(`host-${sessionCode}`).emit('reaction-received', {
         emoji,
         participantId: socket.id,
         participantName: participant.name,
         timestamp: new Date()
       })
-
       // Broadcast to other participants (optional)
       socket.to(`session-${sessionCode}`).emit('reaction-display', {
         emoji,
@@ -940,14 +788,11 @@ app.prepare().then(() => {
     socket.on('update-team-score', ({ sessionCode, team, points }) => {
       const session = gameState.sessions.get(sessionCode)
       if (!session || socket.id !== session.host) return
-
       if (!session.teamScores) {
         session.teamScores = new Map()
       }
-
       const currentScore = session.teamScores.get(team) || 0
       session.teamScores.set(team, currentScore + points)
-
       io.to(`session-${sessionCode}`).emit('team-scores-updated', {
         teamScores: Array.from(session.teamScores.entries())
       })
@@ -960,7 +805,6 @@ app.prepare().then(() => {
         socket.emit('session-status', { exists: false })
         return
       }
-
       socket.emit('session-status', {
         exists: true,
         status: session.status,
@@ -969,29 +813,26 @@ app.prepare().then(() => {
       })
     })
 
+    // ===== COLLABORATIVE EDITING HANDLERS =====
+
     // Disconnect handling
     socket.on('disconnect', () => {
       console.log('User disconnected:', socket.id)
-      
       const user = gameState.users.get(socket.id)
       if (user && user.sessionCode) {
         const session = gameState.sessions.get(user.sessionCode)
-        
         if (session) {
           if (user.role === 'participant' && session.participants.has(socket.id)) {
             const participant = session.participants.get(socket.id)
-            
             // Mark as inactive instead of removing
             participant.isActive = false
             participant.disconnectedAt = new Date()
-            
             io.to(`host-${user.sessionCode}`).emit('participant-left', {
               participantId: socket.id,
               participantName: participant.name,
               totalParticipants: session.participants.size,
               activeParticipants: Array.from(session.participants.values()).filter(p => p.isActive !== false).length
             })
-
             // Actualizar audiencia
             io.to(`session-${user.sessionCode}`).emit('audience:update', {
               totalParticipants: session.participants.size,
@@ -1005,19 +846,16 @@ app.prepare().then(() => {
           }
         }
       }
-      
       // Clean up collaboration sessions
       gameState.collaborations.forEach((collaborators, presentationId) => {
         collaborators.forEach((collaborator, userId) => {
           if (collaborator.socketId === socket.id) {
             collaborators.delete(userId)
-            
             // Notify other collaborators
             socket.to(`collab-${presentationId}`).emit('collaborator-left', {
               userId,
               userName: collaborator.userName,
             })
-            
             // Clean up empty collaboration sessions
             if (collaborators.size === 0) {
               gameState.collaborations.delete(presentationId)
@@ -1025,70 +863,22 @@ app.prepare().then(() => {
           }
         })
       })
-      
       // Clean up
       gameState.users.delete(socket.id)
       gameState.rateLimits.delete(socket.id)
     })
 
-    // Reconnection handling
-    socket.on('reconnect-session', ({ sessionCode, participantId }) => {
-      const session = gameState.sessions.get(sessionCode)
-      if (!session) {
-        socket.emit('error', { message: 'Sesión no encontrada' })
-        return
-      }
-
-      const participant = session.participants.get(participantId)
-      if (participant) {
-        // Reactivate participant
-        participant.isActive = true
-        participant.reconnectedAt = new Date()
-        
-        // Update socket ID
-        session.participants.delete(participantId)
-        session.participants.set(socket.id, participant)
-        participant.id = socket.id
-        
-        socket.join(`session-${sessionCode}`)
-        
-        const presentation = gameState.presentations.get(session.presentationId)
-        const currentSlide = presentation.slides[session.currentSlideIndex]
-        
-        socket.emit('reconnected', {
-          session: {
-            code: session.code,
-            currentSlideIndex: session.currentSlideIndex,
-            status: session.status,
-          },
-          currentSlide,
-          participant
-        })
-        
-        io.to(`host-${sessionCode}`).emit('participant-reconnected', {
-          participantId: socket.id,
-          participantName: participant.name
-        })
-      }
-    })
-
-    // ===== COLLABORATIVE EDITING HANDLERS =====
-    
     // Join collaboration session
     socket.on('join-collaboration', ({ presentationId, userId, userName, userEmail }) => {
       const collaborationRoom = `collab-${presentationId}`
-      
       // Join the collaboration room
       socket.join(collaborationRoom)
-      
       // Track collaborator
       if (!gameState.collaborations.has(presentationId)) {
         gameState.collaborations.set(presentationId, new Map())
       }
-      
       const collaborators = gameState.collaborations.get(presentationId)
       const color = generateCollaboratorColor(collaborators.size)
-      
       collaborators.set(userId, {
         socketId: socket.id,
         userId,
@@ -1099,7 +889,6 @@ app.prepare().then(() => {
         isActive: true,
         role: collaborators.size === 0 ? 'owner' : 'editor',
       })
-      
       // Send current collaborators list to the new user
       socket.emit('collaborators-list', {
         collaborators: Array.from(collaborators.values()).map(c => ({
@@ -1112,35 +901,25 @@ app.prepare().then(() => {
           role: c.role,
         }))
       })
-      
       // Notify others of new collaborator
-      socket.to(collaborationRoom).emit('collaborator-joined', {
-        userId,
-        userName,
-        userEmail,
-        color,
-      })
-      
+      socket.to(collaborationRoom).emit('collaborator-joined', { userId, userName, userEmail, color })
       console.log(`${userName} joined collaboration for presentation ${presentationId}`)
     })
-    
+
     // Leave collaboration session
     socket.on('leave-collaboration', ({ presentationId, userId }) => {
       const collaborationRoom = `collab-${presentationId}`
       socket.leave(collaborationRoom)
-      
       const collaborators = gameState.collaborations.get(presentationId)
       if (collaborators) {
         const collaborator = collaborators.get(userId)
         if (collaborator) {
           collaborators.delete(userId)
-          
           // Notify others
           socket.to(collaborationRoom).emit('collaborator-left', {
             userId,
             userName: collaborator.userName,
           })
-          
           // Clean up empty collaboration sessions
           if (collaborators.size === 0) {
             gameState.collaborations.delete(presentationId)
@@ -1148,13 +927,11 @@ app.prepare().then(() => {
         }
       }
     })
-    
+
     // Handle cursor movement
     socket.on('cursor-move', ({ userId, presentationId, cursor }) => {
       if (!checkRateLimit(socket.id, 'messages')) return
-      
       const collaborationRoom = `collab-${presentationId}`
-      
       // Update collaborator's last activity
       const collaborators = gameState.collaborations.get(presentationId)
       if (collaborators) {
@@ -1163,41 +940,30 @@ app.prepare().then(() => {
           collaborator.lastActiveAt = new Date()
         }
       }
-      
       // Broadcast cursor position to other collaborators
-      socket.to(collaborationRoom).emit('cursor-update', {
-        userId,
-        cursor,
-      })
+      socket.to(collaborationRoom).emit('cursor-update', { userId, cursor })
     })
-    
+
     // Handle content changes
     socket.on('content-change', ({ userId, presentationId, change }) => {
       if (!checkRateLimit(socket.id, 'actions')) {
         socket.emit('error', { message: 'Demasiadas acciones. Intenta de nuevo.' })
         return
       }
-      
       const collaborationRoom = `collab-${presentationId}`
-      
       // Validate change structure
       if (!change.type || !change.target || !change.targetId) {
         socket.emit('error', { message: 'Cambio inválido' })
         return
       }
-      
       // Broadcast change to other collaborators
       socket.to(collaborationRoom).emit('content-change', {
         userId,
-        change: {
-          ...change,
-          timestamp: new Date().toISOString(),
-        },
+        change: { ...change, timestamp: new Date().toISOString() },
       })
-      
       console.log(`Content change from ${userId} in presentation ${presentationId}`)
     })
-    
+
     // Heartbeat for collaboration
     socket.on('heartbeat', ({ userId }) => {
       // Update last activity for all collaboration sessions
@@ -1209,38 +975,64 @@ app.prepare().then(() => {
         }
       })
     })
-    
+
     // Request sync
     socket.on('sync-request', ({ presentationId }) => {
       const collaborationRoom = `collab-${presentationId}`
-      
       // Ask a random active collaborator for current state
       const collaborators = gameState.collaborations.get(presentationId)
       if (collaborators && collaborators.size > 1) {
         const activeCollaborators = Array.from(collaborators.values())
           .filter(c => c.socketId !== socket.id && c.isActive)
-        
         if (activeCollaborators.length > 0) {
           const randomCollaborator = activeCollaborators[Math.floor(Math.random() * activeCollaborators.length)]
           io.to(randomCollaborator.socketId).emit('sync-request')
         }
       }
     })
+
+    function updateLeaderboard(session) {
+      const leaderboard = Array.from(session.participants.values())
+        .filter(p => p.isActive !== false)
+        .map(p => ({ id: p.id, name: p.name, team: p.team, score: p.score, responseCount: p.responses.size }))
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 10)
+      session.leaderboard = leaderboard
+    }
   })
+}
+
+module.exports = { registerSocketHandlers }
+
+if (require.main === module) app.prepare().then(() => {
+  const server = createServer((req, res) => {
+    // Add error handling for Next.js routes
+    handle(req, res).catch((err) => {
+      console.error('Error handling request:', err)
+      res.statusCode = 500
+      res.end('Internal Server Error')
+    })
+  })
+
+  const io = new Server(server, {
+    cors: {
+      origin: "*",
+      methods: ["GET", "POST"]
+    },
+    pingTimeout: 60000,
+    pingInterval: 30000,
+  })
+
+  initializeDemoPresentations()
+
+  registerSocketHandlers(io, { prefixLog: '[WS]' })
 
   function updateLeaderboard(session) {
     const leaderboard = Array.from(session.participants.values())
       .filter(p => p.isActive !== false)
-      .map(p => ({
-        id: p.id,
-        name: p.name,
-        team: p.team,
-        score: p.score,
-        responseCount: p.responses.size
-      }))
+      .map(p => ({ id: p.id, name: p.name, team: p.team, score: p.score, responseCount: p.responses.size }))
       .sort((a, b) => b.score - a.score)
       .slice(0, 10)
-    
     session.leaderboard = leaderboard
   }
 
