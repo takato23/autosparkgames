@@ -12,7 +12,8 @@
     "start": "next start -p 3004",
     "preview:vite": "vite preview",
     "test": "vitest run",
-    "test:ui": "vitest"
+    "test:ui": "vitest",
+    "socket:dev": "node server/socket.dev.js"
   },
   "dependencies": {
     "@emotion/cache": "^11.14.0",
