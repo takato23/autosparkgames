@@ -1,0 +1,62 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function hasValidImageType() {
+      return request.resource.contentType.matches('image/.*');
+    }
+    
+    function hasValidFileSize() {
+      return request.resource.size < 10 * 1024 * 1024; // 10MB limit
+    }
+    
+    // User avatars
+    match /users/{userId}/avatar/{fileName} {
+      allow read: if true; // Public avatars
+      allow write: if isOwner(userId) && hasValidImageType() && hasValidFileSize();
+      allow delete: if isOwner(userId);
+    }
+    
+    // Presentation assets
+    match /presentations/{presentationId}/{allPaths=**} {
+      allow read: if true; // Public presentation assets
+      allow write: if isAuthenticated() && hasValidFileSize();
+      allow delete: if isAuthenticated();
+    }
+    
+    // Slide images
+    match /slides/{slideId}/images/{fileName} {
+      allow read: if true;
+      allow write: if isAuthenticated() && hasValidImageType() && hasValidFileSize();
+      allow delete: if isAuthenticated();
+    }
+    
+    // Organization logos
+    match /organizations/{orgId}/logo/{fileName} {
+      allow read: if true;
+      allow write: if isAuthenticated() && hasValidImageType() && hasValidFileSize();
+      allow delete: if isAuthenticated();
+    }
+    
+    // Temporary uploads (cleaned up after 24 hours)
+    match /temp/{userId}/{fileName} {
+      allow read: if isOwner(userId);
+      allow write: if isOwner(userId) && hasValidFileSize();
+      allow delete: if isOwner(userId);
+    }
+    
+    // Block all other paths
+    match /{document=**} {
+      allow read: if false;
+      allow write: if false;
+    }
+  }
+}

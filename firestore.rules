@@ -1,0 +1,110 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function hasRole(role) {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == role;
+    }
+    
+    function isPresenterOrAdmin() {
+      return hasRole('presenter') || hasRole('admin');
+    }
+    
+    function isAdmin() {
+      return hasRole('admin');
+    }
+    
+    function isSessionParticipant(sessionId) {
+      return isAuthenticated() && 
+        exists(/databases/$(database)/documents/sessions/$(sessionId)/participants/$(request.auth.uid));
+    }
+    
+    function isSessionOwner(sessionId) {
+      let session = get(/databases/$(database)/documents/sessions/$(sessionId));
+      let presentation = get(/databases/$(database)/documents/presentations/$(session.data.presentationId));
+      return isOwner(presentation.data.userId);
+    }
+    
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isOwner(userId);
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+    
+    // User profiles subcollection
+    match /users/{userId}/profile/{document=**} {
+      allow read: if true; // Public profiles
+      allow write: if isOwner(userId);
+    }
+    
+    // Presentations collection
+    match /presentations/{presentationId} {
+      allow read: if isAuthenticated() && 
+        (resource.data.userId == request.auth.uid || 
+         resource.data.status == 'published' ||
+         isAdmin());
+      allow create: if isPresenterOrAdmin();
+      allow update: if isOwner(resource.data.userId) || isAdmin();
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+    }
+    
+    // Sessions collection
+    match /sessions/{sessionId} {
+      // Anyone can read session by code (for joining)
+      allow read: if true;
+      allow create: if isPresenterOrAdmin();
+      allow update: if isSessionOwner(sessionId) || isAdmin();
+      allow delete: if isSessionOwner(sessionId) || isAdmin();
+    }
+    
+    // Session participants subcollection
+    match /sessions/{sessionId}/participants/{participantId} {
+      allow read: if isSessionParticipant(sessionId) || isSessionOwner(sessionId);
+      allow create: if true; // Anyone can join
+      allow update: if isOwner(participantId) || isSessionOwner(sessionId);
+      allow delete: if isSessionOwner(sessionId) || isAdmin();
+    }
+    
+    // Session responses subcollection
+    match /sessions/{sessionId}/responses/{responseId} {
+      allow read: if isSessionParticipant(sessionId) || isSessionOwner(sessionId);
+      allow create: if isSessionParticipant(sessionId);
+      allow update: if false; // Responses are immutable
+      allow delete: if isSessionOwner(sessionId) || isAdmin();
+    }
+    
+    // Participants collection (for real-time participant data)
+    match /participants/{participantId} {
+      allow read: if isOwner(resource.data.userId) || 
+        isSessionOwner(resource.data.sessionId) ||
+        isSessionParticipant(resource.data.sessionId);
+      allow create: if true; // Anyone can create participant record
+      allow update: if isOwner(resource.data.userId) || 
+        (resource.data.userId == null && request.resource.data.id == participantId);
+      allow delete: if isOwner(resource.data.userId) || isAdmin();
+    }
+    
+    // Analytics collection (read-only for users)
+    match /analytics/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if false; // Only server-side writes
+    }
+    
+    // System configuration (admin only)
+    match /config/{document=**} {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin();
+    }
+  }
+}
