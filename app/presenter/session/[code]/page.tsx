@@ -10,6 +10,7 @@ import TeamScoreboard from '@/components/presenter/TeamScoreboard'
 import WordCloudDisplay from '@/components/presenter/WordCloudDisplay'
 import ReactionDisplay from '@/components/presenter/ReactionDisplay'
 import { Card } from '@/lib/design-system/components'
+import { Button } from '@/components/ui/button'
 import { motion } from 'framer-motion'
 
 export default function SessionPage() {
@@ -123,7 +124,18 @@ export default function SessionPage() {
                 </h3>
                 
                 {currentSlide.type === 'word-cloud' && (
-                  <WordCloudDisplay words={wordCloudData} />
+                  <div className="space-y-4">
+                    <WordCloudDisplay words={wordCloudData} />
+                    <div className="text-right">
+                      <Button
+                        variant="outline"
+                        onClick={() => socket?.emit('word-cloud:clear', { slideId: currentSlide.id })}
+                        aria-label="Limpiar respuestas de la nube de palabras"
+                      >
+                        Limpiar respuestas
+                      </Button>
+                    </div>
+                  </div>
                 )}
                 
                 {currentSlide.type === 'trivia' && (

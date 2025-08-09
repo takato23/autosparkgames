@@ -202,6 +202,18 @@ function generateCollaboratorColor(index) {
   return colors[index % colors.length]
 }
 
+// =======================
+// Helpers (módulo)
+// =======================
+function updateLeaderboard(session) {
+  const leaderboard = Array.from(session.participants.values())
+    .filter(p => p.isActive !== false)
+    .map(p => ({ id: p.id, name: p.name, team: p.team, score: p.score, responseCount: p.responses.size }))
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 10)
+  session.leaderboard = leaderboard
+}
+
 function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
   // Socket.io connection handling
   io.on('connection', (socket) => {
@@ -495,7 +507,6 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
     })
 
     // ===== NUEVOS HANDLERS: Estado de pregunta (show/lock/reveal/next) =====
-    // Estos eventos actualizan el estado en memoria y emiten slide:state al canal session-{code}
     socket.on('question:show', ({ slideIndex }) => {
       try {
         const user = gameState.users.get(socket.id)
@@ -510,14 +521,10 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
         session.slideState = 'show'
         session.state = 'show'
         const currentSlide = presentation.slides[session.currentSlideIndex]
-        // Compat heredada
         io.to(`session-${code}`).emit('slide-changed', { slideIndex: session.currentSlideIndex, slide: currentSlide })
-        // Nuevo evento
-        // eslint-disable-next-line no-console
         console.log(`${prefixLog} question:show`, { code, slideIndex: session.currentSlideIndex })
         io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'show' })
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.error('[WebSocket] question:show error', error)
       }
     })
@@ -529,17 +536,14 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
         if (!code) return
         const session = gameState.sessions.get(code)
         if (!session || socket.id !== session.host) return
-        // Si se provee slideIndex, sincronizamos
         if (typeof slideIndex === 'number') {
           session.currentSlideIndex = slideIndex
         }
         session.slideState = 'locked'
         session.state = 'locked'
-        // eslint-disable-next-line no-console
         console.log(`${prefixLog} question:lock`, { code, slideIndex: session.currentSlideIndex })
         io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'locked' })
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.error('[WebSocket] question:lock error', error)
       }
     })
@@ -556,11 +560,9 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
         }
         session.slideState = 'reveal'
         session.state = 'reveal'
-        // eslint-disable-next-line no-console
         console.log(`${prefixLog} question:reveal`, { code, slideIndex: session.currentSlideIndex })
         io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'reveal' })
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.error('[WebSocket] question:reveal error', error)
       }
     })
@@ -579,14 +581,10 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
         session.slideState = 'show'
         session.state = 'show'
         const currentSlide = presentation.slides[session.currentSlideIndex]
-        // Compat heredada
         io.to(`session-${code}`).emit('slide-changed', { slideIndex: session.currentSlideIndex, slide: currentSlide })
-        // Nuevo evento
-        // eslint-disable-next-line no-console
         console.log(`${prefixLog} question:next`, { code, nextIndex: session.currentSlideIndex })
         io.to(`session-${code}`).emit('slide:state', { slideIndex: session.currentSlideIndex, state: 'show' })
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.error('[WebSocket] question:next error', error)
       }
     })
@@ -698,7 +696,6 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
         counts[answer] = (counts[answer] || 0) + 1
         // Emitir actualización inmediata
         const total = counts.reduce((a, b) => a + b, 0)
-        // eslint-disable-next-line no-console
         console.log(`${prefixLog} answer:submit`, { code, slideId, slideIndex: effectiveIndex })
         io.to(`host-${code}`).emit('results:update', { slideId, counts: [...counts], total })
         io.to(`session-${code}`).emit('results:update', { slideId, counts: [...counts], total })
@@ -716,18 +713,7 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
           session.resultsEmitTimers.set(slideId, t)
         }
       } catch (error) {
-        // eslint-disable-next-line no-console
         console.error('[WebSocket] answer:submit error', error)
-      }
-    })
-
-    // Compat: mapear 'submit-answer' al nuevo 'answer:submit'
-    socket.on('submit-answer', (payload) => {
-      try {
-        socket.emit('debug', { note: 'submit-answer deprecated → forwarding to answer:submit' })
-        socket.listeners('answer:submit')?.forEach(fn => fn(payload))
-      } catch (e) {
-        console.error('[WebSocket] compat submit-answer → answer:submit', e)
       }
     })
 
@@ -739,6 +725,13 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
       }
       const session = gameState.sessions.get(sessionCode)
       if (!session) return
+
+      // Respetar estado bloqueado
+      if (session.slideState === 'locked') {
+        socket.emit('error', { message: 'Respuestas bloqueadas' })
+        return
+      }
+
       if (!session.responses.has(slideId)) {
         session.responses.set(slideId, [])
       }
@@ -991,14 +984,28 @@ function registerSocketHandlers(io, { prefixLog = '[WS]' } = {}) {
       }
     })
 
-    function updateLeaderboard(session) {
-      const leaderboard = Array.from(session.participants.values())
-        .filter(p => p.isActive !== false)
-        .map(p => ({ id: p.id, name: p.name, team: p.team, score: p.score, responseCount: p.responses.size }))
-        .sort((a, b) => b.score - a.score)
-        .slice(0, 10)
-      session.leaderboard = leaderboard
-    }
+    // Limpieza de word cloud
+    socket.on('word-cloud:clear', ({ slideId }) => {
+      try {
+        const user = gameState.users.get(socket.id)
+        const code = user?.sessionCode
+        if (!code) return
+        const session = gameState.sessions.get(code)
+        if (!session || socket.id !== session.host) return
+        if (!slideId) return
+
+        // Reiniciar respuestas del slide
+        session.responses.set(slideId, [])
+
+        // Emitir actualización vacía
+        io.to(`session-${code}`).emit('word-cloud-update', {
+          slideId,
+          wordCounts: []
+        })
+      } catch (error) {
+        console.error('[WebSocket] word-cloud:clear error', error)
+      }
+    })
   })
 }
 
@@ -1024,17 +1031,7 @@ if (require.main === module) app.prepare().then(() => {
   })
 
   initializeDemoPresentations()
-
   registerSocketHandlers(io, { prefixLog: '[WS]' })
-
-  function updateLeaderboard(session) {
-    const leaderboard = Array.from(session.participants.values())
-      .filter(p => p.isActive !== false)
-      .map(p => ({ id: p.id, name: p.name, team: p.team, score: p.score, responseCount: p.responses.size }))
-      .sort((a, b) => b.score - a.score)
-      .slice(0, 10)
-    session.leaderboard = leaderboard
-  }
 
   server.listen(port, () => {
     console.log(`> Ready on http://localhost:${port}`)

@@ -567,6 +567,23 @@ export default function SessionControl({
             Estadísticas
           </Button>
         </div>
+
+        {sessionStatus === 'ended' && leaderboard && leaderboard.length > 0 && (
+          <div className="mt-6 border-t border-gray-700 pt-4">
+            <h4 className="text-lg font-semibold mb-3">Tabla de posiciones</h4>
+            <ol className="space-y-2">
+              {leaderboard.map((entry: any, idx: number) => (
+                <li key={idx} className="flex items-center justify-between rounded-md bg-gray-800/50 border border-gray-700 px-3 py-2">
+                  <span className="flex items-center gap-2">
+                    <span className="inline-flex items-center justify-center w-6 h-6 rounded-full bg-gray-700 text-xs font-bold">{entry.rank ?? idx + 1}</span>
+                    <span className="font-medium">{entry.name}</span>
+                  </span>
+                  <span className="tabular-nums font-semibold">{entry.score}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+        )}
       </div>
     </Card>
   )

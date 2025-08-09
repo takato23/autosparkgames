@@ -247,11 +247,19 @@ export default function SessionPage() {
           }
         }
       }
+
+      // Envío por socket para nube de palabras en vivo
+      if (socket && currentSlide.type === 'word_cloud') {
+        const words = (fullResponse as any).words as string[] | undefined
+        if (Array.isArray(words) && words.length > 0) {
+          socket.emit('submit-word-cloud', { sessionCode: code, slideId: currentSlide.id, words })
+        }
+      }
     } catch (err) {
       console.error('Error submitting response:', err)
       setError('Failed to submit response. Please try again.')
     }
-  }, [participantId, currentSlide, sessionId, hasResponded, isAnswered, socket, session, markAnswered])
+  }, [participantId, currentSlide, sessionId, hasResponded, isAnswered, socket, session, markAnswered, code])
 
   if (isLoading) {
     return (
