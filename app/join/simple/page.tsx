@@ -27,7 +27,8 @@ function SimpleJoinContent() {
   const [name, setName] = useState('')
   const [isJoining, setIsJoining] = useState(false)
   const [step, setStep] = useState<'code' | 'name'>('code')
-  const { joinSession } = useGameSession()
+  const { joinSession, socket } = useGameSession()
+  const [error, setError] = useState<string | null>(null)
 
   useEffect(() => {
     const q = search.get('code')
@@ -52,8 +53,20 @@ function SimpleJoinContent() {
     }
 
     setIsJoining(true)
+    setError(null)
 
+    // Suscribirse temporalmente a errores del socket durante el intento de unión
+    const errorHandler = (payload: any) => {
+      const message = payload?.message || 'No se pudo unir a la sesión'
+      // eslint-disable-next-line no-console
+      console.error('[Join] socket error', payload)
+      setError(message)
+      toast.error(message)
+    }
     try {
+      if (socket) {
+        socket.on('error', errorHandler)
+      }
       // eslint-disable-next-line no-console
       console.info('[Join] intentando unirse', { code, name: name.trim() })
       const data: any = await joinSession(code, name.trim())
@@ -74,8 +87,14 @@ function SimpleJoinContent() {
       router.push(`/session/${code}/participant`)
     } catch (e) {
       const msg = (e as { message?: string })?.message || 'No se pudo unir a la sesión'
+      // eslint-disable-next-line no-console
+      console.error('[Join] join-session error', e)
+      setError(msg)
       toast.error(msg)
     } finally {
+      if (socket) {
+        try { socket.off('error', errorHandler) } catch {}
+      }
       setIsJoining(false)
     }
   }
@@ -180,6 +199,16 @@ function SimpleJoinContent() {
                     Este nombre aparecerá en la presentación
                   </p>
                 </div>
+
+                {error && (
+                  <div
+                    role="status"
+                    aria-live="polite"
+                    className="text-red-600 text-sm bg-red-50 border border-red-200 rounded-md p-3"
+                  >
+                    {error}
+                  </div>
+                )}
 
                 <div className="space-y-3">
                   <Button 
