@@ -9,6 +9,8 @@ import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { QrCode, Users, Clock, Trophy } from 'lucide-react'
 import BarChart from '@/components/ui/BarChart'
+import QuickTriviaProjector from '@/components/games/QuickTriviaProjector'
+import ExpressWordCloudProjector from '@/components/games/ExpressWordCloudProjector'
 
 export default function ProjectorPage() {
   const params = useParams()
@@ -24,6 +26,7 @@ export default function ProjectorPage() {
   const [total, setTotal] = useState<number>(0)
   const liveBarsOnShow = process.env.NEXT_PUBLIC_LIVE_BARS_ON_SHOW === 'true'
   const [highlighted, setHighlighted] = useState<{ text: string; author?: string } | null>(null)
+  const [wordCloudData, setWordCloudData] = useState<Array<{ word: string; count: number }>>([])
   const joinUrl = useMemo(() => {
     if (typeof window === 'undefined') return ''
     const base = window.location.origin
@@ -57,6 +60,7 @@ export default function ProjectorPage() {
       }),
       on('qna-highlight', ({ text, author }) => setHighlighted({ text, author })),
       on('qna-clear-highlight', () => setHighlighted(null)),
+      on('word-cloud-update', ({ wordCounts }) => setWordCloudData(Array.isArray(wordCounts) ? wordCounts : [])),
     ]
 
     return () => { unsub.forEach(u => u && u()) }
@@ -119,36 +123,7 @@ export default function ProjectorPage() {
           )}
 
           {slide?.type === 'trivia' && (
-            <div className="text-center space-y-6">
-              <h3 className="text-2xl font-bold">{slide.question}</h3>
-              <div className="grid grid-cols-2 gap-4 max-w-3xl mx-auto">
-                {slide.options?.map((opt: any) => (
-                  <div key={opt.id} className="p-4 rounded-lg bg-white/10 border border-white/20">
-                    {opt.text}
-                  </div>
-                ))}
-              </div>
-              {/* Barras en reveal o en show si flag activa */}
-              {(slideState === 'reveal' || (slideState === 'show' && liveBarsOnShow)) && (
-                <div className="mt-8">
-                  <BarChart
-                    labels={(slide.options || []).map((o: any) => o.text)}
-                    counts={counts}
-                    total={total}
-                    reveal={slideState === 'reveal'}
-                    correctIndex={(() => {
-                      if (slideState !== 'reveal') return undefined
-                      if (typeof slide.correctAnswer === 'string') {
-                        const idx = (slide.options || []).findIndex((o: any) => o.id === slide.correctAnswer)
-                        return idx >= 0 ? idx : undefined
-                      }
-                      if (typeof slide.correctIndex === 'number') return slide.correctIndex
-                      return undefined
-                    })()}
-                  />
-                </div>
-              )}
-            </div>
+            <QuickTriviaProjector slide={slide} counts={counts} total={total} slideState={slideState} />
           )}
 
           {slide?.type === 'poll' && (
@@ -165,7 +140,7 @@ export default function ProjectorPage() {
           )}
 
           {slide?.type === 'word-cloud' && (
-            <div className="text-center text-white/80">Nube de palabras activa…</div>
+            <ExpressWordCloudProjector prompt={slide?.question || slide?.prompt} words={wordCloudData} />
           )}
         </CardContent>
       </Card>

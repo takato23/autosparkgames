@@ -56,9 +56,20 @@ function SimpleJoinContent() {
     try {
       // eslint-disable-next-line no-console
       console.info('[Join] intentando unirse', { code, name: name.trim() })
-      await joinSession(code, name.trim())
+      const data: any = await joinSession(code, name.trim())
       // eslint-disable-next-line no-console
       console.info('[Join] conectado y suscripto a room', { room: `session-${code}` })
+      try {
+        if (data?.participant) {
+          sessionStorage.setItem('participant', JSON.stringify({ id: data.participant.id, name: data.participant.name, sessionCode: code }))
+        }
+        if (data?.presentation) {
+          sessionStorage.setItem(`session_${code}_presentation`, JSON.stringify(data.presentation))
+        }
+        if (data?.currentSlide) {
+          sessionStorage.setItem(`session_${code}_currentSlide`, JSON.stringify(data.currentSlide))
+        }
+      } catch {}
       toast.success('¡Te has unido a la sesión!')
       router.push(`/session/${code}/participant`)
     } catch (e) {

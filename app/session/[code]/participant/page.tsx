@@ -26,6 +26,15 @@ import {
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { useSocket } from '@/lib/hooks/useSocket'
+import { useRef } from 'react'
+
+type ServerSlide = {
+  id: string
+  type: 'trivia' | 'word-cloud' | 'poll' | 'title' | string
+  question?: string
+  prompt?: string
+  options?: Array<{ id: string; text: string }>
+}
 
 export default function ParticipantViewPage() {
   const params = useParams()
@@ -39,26 +48,31 @@ export default function ParticipantViewPage() {
   const [currentSlideIndex, setCurrentSlideIndex] = useState(0)
   const [hasResponded, setHasResponded] = useState(false)
   const [response, setResponse] = useState<any>(null)
+  const [serverSlide, setServerSlide] = useState<ServerSlide | null>(null)
+  const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null)
   const [isLoading, setIsLoading] = useState(true)
   const [answersLocked, setAnswersLocked] = useState(false)
 
   useEffect(() => {
     loadSession()
-    // Simular actualización en tiempo real
-    const interval = setInterval(loadSession, 3000)
-    return () => clearInterval(interval)
   }, [sessionCode])
 
   // Suscribirse a bloqueo/desbloqueo de respuestas y tiempo agotado
   useEffect(() => {
     const unsubs = [
-      on('lock-answers', () => {
-        setAnswersLocked(true)
-        toast.info('Respuestas bloqueadas por el presentador')
+      on('slide:state', ({ state }: { state: 'show'|'locked'|'reveal' }) => {
+        setAnswersLocked(state === 'locked')
       }),
-      on('unlock-answers', () => {
-        setAnswersLocked(false)
-        toast.success('Respuestas habilitadas')
+      on('slide-changed', ({ slide }: { slide: ServerSlide }) => {
+        try {
+          if (slide) {
+            setServerSlide(slide)
+            sessionStorage.setItem(`session_${sessionCode}_currentSlide`, JSON.stringify(slide))
+            setHasResponded(false)
+            setSelectedOptionId(null)
+            setResponse(null)
+          }
+        } catch {}
       }),
       on('time-up', () => {
         setAnswersLocked(true)
@@ -87,29 +101,14 @@ export default function ParticipantViewPage() {
       
       setParticipant(participant)
       
-      // Cargar sesión
-      const sessions = JSON.parse(localStorage.getItem('sessions') || '[]')
-      const currentSession = sessions.find((s: any) => s.code === sessionCode)
-      
-      if (!currentSession) {
-        toast.error('Sesión no encontrada')
-        router.push('/join/simple')
-        return
+      // Intentar usar datos guardados por la página de join
+      const p = sessionStorage.getItem(`session_${sessionCode}_presentation`)
+      if (p) {
+        try { setPresentation(JSON.parse(p)) } catch {}
       }
-      
-      setSession(currentSession)
-      
-      // Cargar presentación
-      const presentations = JSON.parse(localStorage.getItem('presentations') || '[]')
-      const currentPresentation = presentations.find((p: any) => p.id === currentSession.presentationId)
-      
-      if (currentPresentation) {
-        setPresentation(currentPresentation)
-        // Obtener índice actual del presentador (simulado)
-        const storedIndex = localStorage.getItem(`session_${sessionCode}_slideIndex`)
-        if (storedIndex) {
-          setCurrentSlideIndex(parseInt(storedIndex))
-        }
+      const sSlide = sessionStorage.getItem(`session_${sessionCode}_currentSlide`)
+      if (sSlide) {
+        try { setServerSlide(JSON.parse(sSlide)) } catch {}
       }
     } catch (error) {
       console.error('Error loading session:', error)
@@ -140,6 +139,54 @@ export default function ParticipantViewPage() {
       timestamp: new Date()
     }
     localStorage.setItem(`session_${sessionCode}_responses`, JSON.stringify(responses))
+
+    // Emitir al servidor si es multiple-choice "simulada"
+    if (serverSlide?.type === 'trivia' && typeof value === 'number') {
+      // value es índice 0..n-1
+      const slideId = serverSlide.id
+      try {
+        const { socket } = useSocket()
+        if (socket) {
+          socket.emit('answer:submit', { slideId, slideIndex: currentSlideIndex, participantId: participant.id, answer: value })
+        }
+      } catch {}
+    }
+  }
+
+  const submitServerTrivia = () => {
+    if (!serverSlide || serverSlide.type !== 'trivia') return
+    if (!selectedOptionId) return
+    const idx = (serverSlide.options || []).findIndex(o => o.id === selectedOptionId)
+    if (idx < 0) return
+    if (answersLocked) {
+      toast.error('Las respuestas están bloqueadas')
+      return
+    }
+    setHasResponded(true)
+    try {
+      const { socket } = useSocket()
+      if (socket) {
+        socket.emit('answer:submit', { slideId: serverSlide.id, slideIndex: currentSlideIndex, participantId: participant?.id, answer: idx })
+      }
+      toast.success('¡Respuesta enviada!')
+    } catch {}
+  }
+
+  const submitServerWordCloud = (text: string) => {
+    if (!serverSlide || serverSlide.type !== 'word-cloud') return
+    if (!text.trim()) return
+    if (answersLocked) {
+      toast.error('Las respuestas están bloqueadas')
+      return
+    }
+    setHasResponded(true)
+    try {
+      const { socket } = useSocket()
+      if (socket) {
+        socket.emit('submit-word-cloud', { sessionCode, slideId: serverSlide.id, words: [text.trim()] })
+      }
+      toast.success('¡Respuesta enviada!')
+    } catch {}
   }
 
   if (isLoading) {
@@ -153,13 +200,71 @@ export default function ParticipantViewPage() {
   const currentContent = presentation?.contents?.[currentSlideIndex]
 
   const renderContent = () => {
-    if (!currentContent) {
+    if (!currentContent && !serverSlide) {
       return (
         <div className="text-center text-white/60">
           <Users className="h-24 w-24 mx-auto mb-4 opacity-50" />
           <p className="text-xl">Esperando al presentador...</p>
         </div>
       )
+    }
+
+    // Render basado en slide del servidor si existe
+    if (serverSlide) {
+      if (serverSlide.type === 'trivia') {
+        return (
+          <div className="space-y-6">
+            <h2 className="text-2xl font-bold text-center mb-6">{serverSlide.question}</h2>
+            <div className="space-y-3">
+              {(serverSlide.options || []).map((opt) => (
+                <Button
+                  key={opt.id}
+                  onClick={() => setSelectedOptionId(opt.id)}
+                  disabled={hasResponded || answersLocked}
+                  variant={selectedOptionId === opt.id ? 'default' : 'outline'}
+                  className="w-full h-14 text-lg justify-start"
+                >
+                  {opt.text}
+                </Button>
+              ))}
+            </div>
+            {!hasResponded && (
+              <Button onClick={submitServerTrivia} disabled={!selectedOptionId || answersLocked} className="w-full" size="lg">Enviar</Button>
+            )}
+          </div>
+        )
+      }
+      if (serverSlide.type === 'word-cloud') {
+        return (
+          <div className="space-y-6">
+            <h2 className="text-2xl font-bold text-center mb-6">{serverSlide.prompt || 'Comparte una palabra'}</h2>
+            <Input
+              placeholder="Escribe aquí..."
+              className="text-lg h-14"
+              onKeyPress={(e) => {
+                if (e.key === 'Enter' && e.currentTarget.value.trim()) {
+                  submitServerWordCloud(e.currentTarget.value.trim())
+                }
+              }}
+              disabled={hasResponded || answersLocked}
+            />
+            <Button 
+              onClick={() => {
+                const input = document.querySelector('input') as HTMLInputElement | null
+                if (input?.value.trim()) {
+                  submitServerWordCloud(input.value.trim())
+                }
+              }}
+              disabled={hasResponded || answersLocked}
+              className="w-full"
+              size="lg"
+            >
+              <Send className="mr-2 h-5 w-5" />
+              Enviar
+            </Button>
+          </div>
+        )
+      }
     }
 
     if (currentContent.type === 'game') {

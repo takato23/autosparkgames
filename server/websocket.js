@@ -884,6 +884,12 @@ app.prepare().then(() => {
       const session = gameState.sessions.get(sessionCode)
       if (!session) return
 
+      // Respetar estado bloqueado
+      if (session.slideState === 'locked') {
+        socket.emit('error', { message: 'Respuestas bloqueadas' })
+        return
+      }
+
       if (!session.responses.has(slideId)) {
         session.responses.set(slideId, [])
       }
@@ -1224,6 +1230,29 @@ app.prepare().then(() => {
           const randomCollaborator = activeCollaborators[Math.floor(Math.random() * activeCollaborators.length)]
           io.to(randomCollaborator.socketId).emit('sync-request')
         }
+      }
+    })
+
+    socket.on('word-cloud:clear', ({ slideId }) => {
+      try {
+        const user = gameState.users.get(socket.id)
+        const code = user?.sessionCode
+        if (!code) return
+        const session = gameState.sessions.get(code)
+        if (!session || socket.id !== session.host) return
+
+        if (!slideId) return
+
+        // Reiniciar respuestas del slide
+        session.responses.set(slideId, [])
+
+        // Emitir actualización vacía
+        io.to(`session-${code}`).emit('word-cloud-update', {
+          slideId,
+          wordCounts: []
+        })
+      } catch (error) {
+        console.error('[WebSocket] word-cloud:clear error', error)
       }
     })
   })
